@@ -7,7 +7,7 @@ import {events as mockMQTTEvents, mockMQTTPublishAsync} from "../mocks/mqtt";
 import {flushPromises} from "../mocks/utils";
 import {type Device, devices, groups, events as mockZHEvents} from "../mocks/zigbeeHerdsman";
 
-import stringify from "json-stable-stringify-without-jsonify";
+import {stringify} from "../../lib/util/stringify";
 import {Controller} from "../../lib/controller";
 import Bind from "../../lib/extension/bind";
 import * as settings from "../../lib/util/settings";
@@ -358,7 +358,7 @@ describe("Extension: Bind", () => {
             {attribute: "currentX", minimumReportInterval: 5, maximumReportInterval: 0xffff, reportableChange: 1},
             {attribute: "currentY", minimumReportInterval: 5, maximumReportInterval: 0xffff, reportableChange: 1},
         ]);
-        expect(devices.bulb_color.meta.configured).toBe(332242049);
+        expect(devices.bulb_color.meta.configured).toBe("0.0.0");
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/device/unbind",
             stringify({

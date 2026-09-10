@@ -1,10 +1,10 @@
 import bind from "bind-decorator";
-import stringify from "json-stable-stringify-without-jsonify";
 import type {Eui64} from "zigbee-herdsman/dist/zspec/tstypes";
 import type {LQITableEntry, RoutingTableEntry} from "zigbee-herdsman/dist/zspec/zdo/definition/tstypes";
 import type {Zigbee2MQTTAPI, Zigbee2MQTTNetworkMap} from "../types/api";
 import logger from "../util/logger";
 import * as settings from "../util/settings";
+import {stringify} from "../util/stringify";
 import utils from "../util/utils";
 import Extension from "./extension";
 
@@ -92,6 +92,8 @@ export default class NetworkMap extends Extension {
             }
 
             labels.push(lastSeen);
+            // Escape backslashes and double-quotes to avoid breaking Graphviz .dot files.
+            const escapedLabels = labels.map((label) => label.replace(/\\/g, "\\\\").replace(/"/g, '\\"'));
 
             // Shape the record according to device type
             if (node.type === "Coordinator") {
@@ -103,7 +105,7 @@ export default class NetworkMap extends Extension {
             }
 
             // Add the device with its labels to the graph as a node.
-            text += `  "${node.ieeeAddr}" [${style}, label="{${labels.join("|")}}"];\n`;
+            text += `  "${node.ieeeAddr}" [${style}, label="{${escapedLabels.join("|")}}"];\n`;
 
             /**
              * Add an edge between the device and its child to the graph

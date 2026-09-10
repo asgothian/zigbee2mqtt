@@ -1,8 +1,8 @@
 import path from "node:path";
 import type {ValidateFunction} from "ajv";
 import Ajv from "ajv";
-import objectAssignDeep from "object-assign-deep";
 import data from "./data";
+import {objectAssignDeep} from "./objectAssignDeep";
 import schemaJson from "./settings.schema.json";
 import utils from "./utils";
 import yaml from "./yaml";
@@ -10,7 +10,7 @@ import yaml from "./yaml";
 export {schemaJson};
 // When updating also update:
 // - https://github.com/Koenkk/zigbee2mqtt/blob/dev/data/configuration.example.yaml#L2
-export const CURRENT_VERSION = 4;
+export const CURRENT_VERSION = 5;
 /** NOTE: by order of priority, lower index is lower level (more important) */
 export const LOG_LEVELS: readonly string[] = ["error", "warning", "info", "debug"] as const;
 export type LogLevel = "error" | "warning" | "info" | "debug";
@@ -82,6 +82,7 @@ export const defaults = {
     ota: {
         update_check_interval: 24 * 60,
         disable_automatic_update_check: false,
+        image_block_request_timeout: 150000,
         image_block_response_delay: 250,
         default_maximum_data_size: 50,
     },
@@ -112,6 +113,7 @@ export const defaults = {
         network_key: [1, 3, 5, 7, 9, 11, 13, 15, 0, 2, 4, 6, 8, 10, 12, 13],
         timestamp_format: "YYYY-MM-DD HH:mm:ss",
         output: "json",
+        enable_external_js: true,
     },
     health: {
         interval: 10,
@@ -166,6 +168,7 @@ export function writeMinimalDefaults(): void {
             network_key: "GENERATE",
             pan_id: "GENERATE",
             ext_pan_id: "GENERATE",
+            enable_external_js: false,
         },
         frontend: {
             enabled: defaults.frontend.enabled,
@@ -228,7 +231,10 @@ export function write(): void {
     const writeDevicesOrGroups = (type: "devices" | "groups"): void => {
         if (typeof actual[type] === "string" || (Array.isArray(actual[type]) && actual[type].length > 0)) {
             const fileToWrite = Array.isArray(actual[type]) ? actual[type][0] : actual[type];
-            const content = objectAssignDeep({}, settings[type]);
+            // `readDevicesOrGroups()` already set this to an object whenever the config points at separate files, but the
+            // persisted settings are `Partial`, so the fallback is only here to satisfy the type
+            /* v8 ignore next */
+            const content = objectAssignDeep({}, settings[type] ?? {});
 
             // If an array, only write to first file and only devices which are not in the other files.
             if (Array.isArray(actual[type])) {
@@ -365,8 +371,7 @@ function read(): Partial<Settings> {
             s[type] = {};
             for (const file of files) {
                 const content = yaml.readIfExists(data.joinPath(file));
-                // @ts-expect-error noMutate not typed properly
-                s[type] = objectAssignDeep.noMutate(s[type], content);
+                s[type] = objectAssignDeep({}, s[type], content);
             }
         }
     };
@@ -476,9 +481,7 @@ export function set(path: string[], value: string | number | boolean | KeyValue)
 }
 
 export function apply(settings: Record<string, unknown>, throwOnError = true): boolean {
-    getPersistedSettings(); // Ensure _settings is initialized.
-    // @ts-expect-error noMutate not typed properly
-    const newSettings = objectAssignDeep.noMutate(_settings, settings);
+    const newSettings = objectAssignDeep({}, getPersistedSettings(), settings);
 
     utils.removeNullPropertiesFromObject(newSettings, NULLABLE_SETTINGS);
 

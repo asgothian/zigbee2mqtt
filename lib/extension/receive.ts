@@ -1,14 +1,11 @@
 import assert from "node:assert";
-
 import bind from "bind-decorator";
 import debounce from "debounce";
-import stringify from "json-stable-stringify-without-jsonify";
 import throttle from "throttleit";
-
 import * as zhc from "zigbee-herdsman-converters";
-
 import logger from "../util/logger";
 import * as settings from "../util/settings";
+import {stringify} from "../util/stringify";
 import utils from "../util/utils";
 import Extension from "./extension";
 
@@ -183,8 +180,11 @@ export default class Receive extends Extension {
 
         if (!utils.objectIsEmpty(payload)) {
             await publish(payload);
-        } else {
-            await utils.publishLastSeen({device: data.device, reason: "messageEmitted"}, settings.get(), true, this.publishEntityState);
+        } else if (settings.get().advanced.last_seen && settings.get().advanced.last_seen !== "disable") {
+            // A message was received that produced no payload (e.g. a frame the converter has no data
+            // for). Publish through the regular publish() path so the per-device debounce/throttle
+            // still applies, instead of publishing the full cached state immediately via publishLastSeen.
+            await publish({});
         }
     }
 }

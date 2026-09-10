@@ -1,9 +1,8 @@
 import {existsSync, readFileSync, writeFileSync} from "node:fs";
 
-import objectAssignDeep from "object-assign-deep";
-
 import data from "./util/data";
 import logger from "./util/logger";
+import {objectAssignDeep} from "./util/objectAssignDeep";
 import * as settings from "./util/settings";
 import utils from "./util/utils";
 
@@ -23,7 +22,6 @@ const CACHE_IGNORE_PROPERTIES = [
     "no_occupancy_since",
     "step_mode",
     "transition_time",
-    "duration",
     "elapsed",
     "from_side",
     "to_side",
@@ -51,11 +49,14 @@ class State {
     }
 
     stop(): void {
-        // Remove any invalid states (ie when the device has left the network) when the system is stopped
-        for (const [key] of this.state) {
-            if (typeof key === "string" && key.startsWith("0x") && !this.zigbee.resolveEntity(key)) {
-                // string key = ieeeAddr
-                this.state.delete(key);
+        // ensure properly started, else this throws undesired errors (e.g. SIGINT during startup)
+        if (this.zigbee.zhController !== undefined) {
+            // Remove any invalid states (ie when the device has left the network) when the system is stopped
+            for (const [key] of this.state) {
+                if (typeof key === "string" && key.startsWith("0x") && !this.zigbee.resolveEntity(key)) {
+                    // string key = ieeeAddr
+                    this.state.delete(key);
+                }
             }
         }
 

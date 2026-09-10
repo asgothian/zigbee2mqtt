@@ -1,5 +1,4 @@
 import bind from "bind-decorator";
-import stringify from "json-stable-stringify-without-jsonify";
 import {setLogger as zhSetLogger} from "zigbee-herdsman";
 import {setLogger as zhcSetLogger} from "zigbee-herdsman-converters";
 import EventBus from "./eventBus";
@@ -24,10 +23,13 @@ import type {Zigbee2MQTTAPI} from "./types/api";
 import logger from "./util/logger";
 import {initSdNotify} from "./util/sd-notify";
 import * as settings from "./util/settings";
+import {stringify} from "./util/stringify";
 import utils from "./util/utils";
 import Zigbee from "./zigbee";
 
 export class Controller {
+    /** Allows canceling in-progress startup sequence if necessary. Signal can be passed to long-running ops as necessary for finer control. */
+    #startAbortController: AbortController | undefined;
     public readonly eventBus: EventBus;
     public readonly zigbee: Zigbee;
     public readonly state: State;
@@ -48,7 +50,6 @@ export class Controller {
         this.state = new State(this.eventBus, this.zigbee);
         this.restartCallback = restartCallback;
         this.exitCallback = exitCallback;
-
         // Initialize extensions.
         this.extensionArgs = [
             this.zigbee,
@@ -60,25 +61,35 @@ export class Controller {
             this.restartCallback,
             this.addExtension,
         ];
+        this.extensions = new Set();
 
-        this.extensions = new Set([
-            new ExtensionExternalConverters(...this.extensionArgs),
-            new ExtensionOnEvent(...this.extensionArgs),
-            new ExtensionBridge(...this.extensionArgs),
-            new ExtensionPublish(...this.extensionArgs),
-            new ExtensionReceive(...this.extensionArgs),
-            new ExtensionConfigure(...this.extensionArgs),
-            new ExtensionNetworkMap(...this.extensionArgs),
-            new ExtensionGroups(...this.extensionArgs),
-            new ExtensionBind(...this.extensionArgs),
-            new ExtensionOTAUpdate(...this.extensionArgs),
-            new ExtensionExternalExtensions(...this.extensionArgs),
-            new ExtensionAvailability(...this.extensionArgs),
-            new ExtensionHealth(...this.extensionArgs),
-        ]);
+        if (settings.get().advanced.enable_external_js) {
+            this.extensions.add(new ExtensionExternalConverters(...this.extensionArgs));
+        } else {
+            logger.info("External JS (converters/extensions) is disabled");
+        }
+
+        this.extensions.add(new ExtensionOnEvent(...this.extensionArgs));
+        this.extensions.add(new ExtensionBridge(...this.extensionArgs));
+        this.extensions.add(new ExtensionPublish(...this.extensionArgs));
+        this.extensions.add(new ExtensionReceive(...this.extensionArgs));
+        this.extensions.add(new ExtensionConfigure(...this.extensionArgs));
+        this.extensions.add(new ExtensionNetworkMap(...this.extensionArgs));
+        this.extensions.add(new ExtensionGroups(...this.extensionArgs));
+        this.extensions.add(new ExtensionBind(...this.extensionArgs));
+        this.extensions.add(new ExtensionOTAUpdate(...this.extensionArgs));
+        this.extensions.add(new ExtensionAvailability(...this.extensionArgs));
+        this.extensions.add(new ExtensionHealth(...this.extensionArgs));
+
+        if (settings.get().advanced.enable_external_js) {
+            this.extensions.add(new ExtensionExternalExtensions(...this.extensionArgs));
+        }
     }
 
     async start(): Promise<void> {
+        this.#startAbortController = new AbortController();
+        const abortSignal = this.#startAbortController.signal;
+
         if (settings.get().frontend.enabled) {
             const {Frontend} = await import("./extension/frontend.js");
 
@@ -93,33 +104,48 @@ export class Controller {
 
         this.state.start();
 
+        if (abortSignal.aborted) {
+            logger.info(`Zigbee2MQTT start aborted, reason=${abortSignal.reason}`);
+            return;
+        }
+
         const info = await utils.getZigbee2MQTTVersion();
         logger.info(`Starting Zigbee2MQTT version ${info.version} (commit #${info.commitHash})`);
 
         // Start zigbee
         try {
-            await this.zigbee.start();
+            const started = await this.zigbee.start(abortSignal);
 
-            this.eventBus.onAdapterDisconnected(this, async () => {
-                logger.error("Adapter disconnected, stopping");
-                await this.stop(false, 2);
-            });
-        } catch (error) {
-            logger.error("Failed to start zigbee-herdsman");
-            logger.error(
-                "Check https://www.zigbee2mqtt.io/guide/installation/20_zigbee2mqtt-fails-to-start_crashes-runtime.html for possible solutions",
-            );
-            logger.error("Exiting...");
-            // biome-ignore lint/style/noNonNullAssertion: always Error
-            logger.error((error as Error).stack!);
-
-            /* v8 ignore start */
-            if ((error as Error).message.includes("USB adapter discovery error (No valid USB adapter found)")) {
-                logger.error("If this happens after updating to Zigbee2MQTT 2.0.0, see https://github.com/Koenkk/zigbee2mqtt/discussions/24364");
+            if (started) {
+                this.eventBus.onAdapterDisconnected(this, async () => {
+                    logger.error("Adapter disconnected, stopping");
+                    await this.stop(false, 2);
+                });
             }
-            /* v8 ignore stop */
+        } catch (error) {
+            // skip if aborted by `stop`
+            if (error !== "SIGINT" && error !== "SIGTERM" && error !== "STOPABORT") {
+                logger.error("Failed to start zigbee-herdsman");
+                logger.error(
+                    "Check https://www.zigbee2mqtt.io/guide/installation/20_zigbee2mqtt-fails-to-start_crashes-runtime.html for possible solutions",
+                );
+                logger.error("Exiting...");
+                // biome-ignore lint/style/noNonNullAssertion: always Error
+                logger.error((error as Error).stack!);
 
-            return await this.exit(1);
+                /* v8 ignore start */
+                if ((error as Error).message.includes("USB adapter discovery error (No valid USB adapter found)")) {
+                    logger.error("If this happens after updating to Zigbee2MQTT 2.0.0, see https://github.com/Koenkk/zigbee2mqtt/discussions/24364");
+                }
+                /* v8 ignore stop */
+
+                return await this.exit(1);
+            }
+        }
+
+        if (abortSignal.aborted) {
+            logger.info(`Zigbee2MQTT start aborted, reason=${abortSignal.reason}`);
+            return;
         }
 
         // Log zigbee clients on startup
@@ -147,9 +173,19 @@ export class Controller {
             return await this.exit(1);
         }
 
+        if (abortSignal.aborted) {
+            logger.info(`Zigbee2MQTT start aborted, reason=${abortSignal.reason}`);
+            return;
+        }
+
         // copy current Set of extensions to ignore possible external extensions added while looping
         for (const extension of new Set(this.extensions)) {
             await this.startExtension(extension);
+
+            if (abortSignal.aborted) {
+                logger.info(`Zigbee2MQTT start aborted, reason=${abortSignal.reason}`);
+                return;
+            }
         }
 
         // Send all cached states.
@@ -157,6 +193,11 @@ export class Controller {
             for (const entity of this.zigbee.devicesAndGroupsIterator()) {
                 if (this.state.exists(entity)) {
                     await this.publishEntityState(entity, this.state.get(entity), "publishCached");
+
+                    if (abortSignal.aborted) {
+                        logger.info(`Zigbee2MQTT start aborted, reason=${abortSignal.reason}`);
+                        return;
+                    }
                 }
             }
         }
@@ -170,10 +211,14 @@ export class Controller {
         this.sdNotify = await initSdNotify();
 
         settings.setOnboarding(false);
+
+        this.#startAbortController = undefined; // gc
     }
 
     @bind async enableDisableExtension(enable: boolean, name: string): Promise<void> {
         if (enable) {
+            let extension: Extension;
+
             switch (name) {
                 case "Frontend": {
                     if (!settings.get().frontend.enabled) {
@@ -184,7 +229,7 @@ export class Controller {
                     /* v8 ignore start */
                     const {Frontend} = await import("./extension/frontend.js");
 
-                    await this.addExtension(new Frontend(...this.extensionArgs));
+                    extension = new Frontend(...this.extensionArgs);
 
                     break;
                     /* v8 ignore stop */
@@ -196,7 +241,7 @@ export class Controller {
 
                     const {HomeAssistant} = await import("./extension/homeassistant.js");
 
-                    await this.addExtension(new HomeAssistant(...this.extensionArgs));
+                    extension = new HomeAssistant(...this.extensionArgs);
 
                     break;
                 }
@@ -206,6 +251,14 @@ export class Controller {
                     );
                 }
             }
+
+            const existingExtension = this.getExtension(name);
+
+            if (existingExtension) {
+                await this.removeExtension(existingExtension);
+            }
+
+            this.extensions.add(extension);
         } else {
             switch (name) {
                 case "Frontend": {
@@ -287,7 +340,10 @@ export class Controller {
         }
     }
 
-    async stop(restart = false, code = 0): Promise<void> {
+    async stop(restart = false, code = 0, signal: NodeJS.Signals | undefined = undefined): Promise<void> {
+        logger.info(`Stopping Zigbee2MQTT (restart=${restart}, code=${code}, signal=${signal})`);
+
+        this.#startAbortController?.abort(signal ?? "STOPABORT");
         this.sdNotify?.notifyStopping();
 
         let localCode = 0;
@@ -406,10 +462,13 @@ export class Controller {
     async iteratePayloadAttributeOutput(topicRoot: string, payload: KeyValue, options: Partial<MqttPublishOptions>): Promise<void> {
         for (const [key, value] of Object.entries(payload)) {
             let subPayload = value;
-            let message = null;
+            let message: string | undefined;
 
             // Special cases
-            if (key === "color" && utils.objectHasProperties(subPayload, ["r", "g", "b"])) {
+            // `objectHasProperties` indexes its argument, so it has to be given an object.
+            // The null check three lines below is too late: `color` is nullable like any
+            // other attribute, and a null one reaches here before that branch runs.
+            if (key === "color" && subPayload != null && utils.objectHasProperties(subPayload, ["r", "g", "b"])) {
                 subPayload = [subPayload.r, subPayload.g, subPayload.b];
             }
 
@@ -424,7 +483,7 @@ export class Controller {
                 message = typeof subPayload === "string" ? subPayload : stringify(subPayload);
             }
 
-            if (message !== null) {
+            if (message !== undefined) {
                 await this.mqtt.publish(`${topicRoot}${key}`, message, options);
             }
         }

@@ -1,13 +1,13 @@
 import assert from "node:assert";
 import bind from "bind-decorator";
 import equals from "fast-deep-equal/es6";
-import stringify from "json-stable-stringify-without-jsonify";
 import type * as zhc from "zigbee-herdsman-converters";
 import Device from "../model/device";
 import Group from "../model/group";
 import type {Zigbee2MQTTAPI, Zigbee2MQTTResponseEndpoints} from "../types/api";
 import logger from "../util/logger";
 import * as settings from "../util/settings";
+import {stringify} from "../util/stringify";
 import utils, {isLightExpose} from "../util/utils";
 import Extension from "./extension";
 
@@ -168,7 +168,7 @@ export default class Groups extends Extension {
                     endpointNames &&
                     endpointNames.length >= member.ID &&
                     device.definition?.meta?.multiEndpoint &&
-                    (!device.definition.meta.multiEndpointSkip || !device.definition.meta.multiEndpointSkip.includes("state"))
+                    !device.definition.meta.multiEndpointSkip?.includes("state")
                         ? `state_${endpointNames[member.ID - 1]}`
                         : "state";
 

@@ -5,16 +5,13 @@ import {createServer} from "node:http";
 import {createServer as createSecureServer} from "node:https";
 import type {Socket} from "node:net";
 import {posix} from "node:path";
-import {parse} from "node:url";
 import bind from "bind-decorator";
-import expressStaticGzip from "express-static-gzip";
-import finalhandler from "finalhandler";
-import stringify from "json-stable-stringify-without-jsonify";
 import WebSocket from "ws";
-
 import data from "../util/data";
 import logger from "../util/logger";
 import * as settings from "../util/settings";
+import {createStaticFileServer, sendNotFound} from "../util/staticFileServer";
+import {stringify} from "../util/stringify";
 import utils from "../util/utils";
 import Extension from "./extension";
 
@@ -67,46 +64,39 @@ export class Frontend extends Extension {
 
                 return false;
             };
-            const options: expressStaticGzip.ExpressStaticGzipOptions = {
-                enableBrotli: true,
-                serveStatic: {
-                    /* v8 ignore start */
-                    setHeaders: (res: ServerResponse, path: string): void => {
-                        if (path.endsWith("index.html")) {
-                            res.setHeader("Cache-Control", "no-store");
-                        }
-                    },
-                    /* v8 ignore stop */
-                },
-            };
             const frontend = (await import(settings.get().frontend.package)) as typeof import("zigbee2mqtt-frontend");
-            const fileServer = expressStaticGzip(frontend.default.getPath(), options);
-            const deviceIconsFileServer = expressStaticGzip(data.joinPath("device_icons"), options);
+            const logError = logger.error.bind(logger);
+            const fileServer = createStaticFileServer(frontend.default.getPath(), logError);
+            const deviceIconsFileServer = createStaticFileServer(data.joinPath("device_icons"), logError);
             const onRequest = (request: IncomingMessage, response: ServerResponse): void => {
-                const next = finalhandler(request, response);
                 // biome-ignore lint/style/noNonNullAssertion: `Only valid for request obtained from Server`
-                const newUrl = posix.relative(this.baseUrl, request.url!);
+                const url = request.url!;
+                const newUrl = posix.relative(this.baseUrl, url);
 
                 // The request url is not within the frontend base url, so the relative path starts with '..'
                 if (newUrl.startsWith(".")) {
-                    next();
+                    sendNotFound(request, response);
 
                     return;
                 }
 
-                // Attach originalUrl so that static-server can perform a redirect to '/' when serving the root directory.
-                // This is necessary for the browser to resolve relative assets paths correctly.
-                request.originalUrl = request.url;
+                // The base url itself is a directory, redirect to its trailing slash form so the browser resolves the
+                // relative asset paths in `index.html` against the frontend root instead of against its parent.
+                if (newUrl === "" && !url.endsWith("/")) {
+                    response.writeHead(301, {Location: `${url}/`});
+                    response.end();
+
+                    return;
+                }
+
                 request.url = `/${newUrl}`;
-                request.path = request.url;
 
                 if (newUrl.startsWith("device_icons/")) {
-                    request.path = request.path.replace("device_icons/", "");
                     request.url = request.url.replace("/device_icons", "");
 
-                    deviceIconsFileServer(request, response, next);
+                    deviceIconsFileServer(request, response);
                 } else {
-                    fileServer(request, response, next);
+                    fileServer(request, response);
                 }
             };
 
@@ -157,10 +147,10 @@ export class Frontend extends Extension {
     @bind private onUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
         this.wss.handleUpgrade(request, socket, head, (ws) => {
             // biome-ignore lint/style/noNonNullAssertion: `Only valid for request obtained from Server`
-            const {query} = parse(request.url!, true);
+            const {searchParams} = new URL(request.url!, "http://localhost"); // dummy base, may not be absolute
             const authToken = settings.get().frontend.auth_token;
 
-            if (!authToken || authToken === query.token) {
+            if (!authToken || authToken === searchParams.get("token")) {
                 this.wss.emit("connection", ws, request);
             } else {
                 ws.close(4401, "Unauthorized");

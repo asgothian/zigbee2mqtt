@@ -2,12 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import bind from "bind-decorator";
-import stringify from "json-stable-stringify-without-jsonify";
 import type {Zigbee2MQTTAPI, Zigbee2MQTTResponse} from "../types/api";
-
 import data from "../util/data";
 import logger from "../util/logger";
 import * as settings from "../util/settings";
+import {stringify} from "../util/stringify";
 import utils from "../util/utils";
 import Extension from "./extension";
 
@@ -176,7 +175,13 @@ export default abstract class ExternalJSExtension<M> extends Extension {
         }
 
         const {name, code} = message;
+
+        if (!name.endsWith(".mjs") && !name.endsWith(".js") && !name.endsWith(".cjs")) {
+            return utils.getResponse(message, {}, "JavaScript file must have '.mjs', '.js' or '.cjs' extension");
+        }
+
         const filePath = this.getFilePath(name, true);
+
         try {
             fs.writeFileSync(filePath, code, "utf8");
             this.symlinkNodeModulesIfNecessary();
@@ -202,14 +207,14 @@ export default abstract class ExternalJSExtension<M> extends Extension {
                 const mod = await this.importFile(filePath);
                 await this.loadJS(extension.name, mod.default);
             } catch (error) {
-                // change ext so Z2M doesn't try to load it again and again
-                fs.renameSync(filePath, `${filePath}.invalid`);
-
                 logger.error(
                     `Invalid external ${this.mqttTopic} '${extension.name}' was ignored and renamed to prevent interference with Zigbee2MQTT. (${(error as Error).message})`,
                 );
                 // biome-ignore lint/style/noNonNullAssertion: always Error
                 logger.debug((error as Error).stack!);
+
+                // change ext so Z2M doesn't try to load it again and again
+                fs.renameSync(filePath, `${filePath}.invalid`);
             }
         }
     }

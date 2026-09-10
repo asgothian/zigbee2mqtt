@@ -17,14 +17,15 @@ import {devices, mockController as mockZHController, events as mockZHEvents, ret
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import stringify from "json-stable-stringify-without-jsonify";
 import tmp from "tmp";
 
+import {stringify} from "../lib/util/stringify";
 import type {Mock, MockInstance} from "vitest";
 import {Controller as ZHController} from "zigbee-herdsman";
 import {Controller} from "../lib/controller";
 import type Device from "../lib/model/device";
 import * as settings from "../lib/util/settings";
+import Frontend from "../lib/extension/frontend";
 
 const LOG_MQTT_NS = "z2m:mqtt";
 
@@ -54,6 +55,7 @@ const mocksClear = [
 describe("Controller", () => {
     let controller: Controller;
     let mockExit: Mock;
+    let stopAfter = true;
 
     const getZ2MDevice = (zhDevice: string | number | ZhDevice): Device => {
         return controller.zigbee.resolveEntity(zhDevice)! as Device;
@@ -64,6 +66,7 @@ describe("Controller", () => {
     });
 
     beforeEach(() => {
+        stopAfter = true;
         returnDevices.splice(0);
         mockExit = vi.fn();
         data.writeDefaultConfiguration();
@@ -79,7 +82,10 @@ describe("Controller", () => {
     });
 
     afterEach(async () => {
-        await controller?.stop();
+        if (stopAfter) {
+            await controller?.stop();
+        }
+
         await flushPromises();
     });
 
@@ -106,7 +112,7 @@ describe("Controller", () => {
         expect(mockLogger.info).toHaveBeenCalledWith(
             "bulb (0x000b57fffec6a5b2): LED1545G12 - IKEA TRADFRI bulb E26/E27, white spectrum, globe, opal, 980 lm (Router)",
         );
-        expect(mockLogger.info).toHaveBeenCalledWith("remote (0x0017880104e45517): 324131092621 - Philips Hue dimmer switch (EndDevice)");
+        expect(mockLogger.info).toHaveBeenCalledWith("remote (0x0017880104e45517): 324131092621 - Philips Hue dimmer switch gen 1 (EndDevice)");
         expect(mockLogger.info).toHaveBeenCalledWith("0x0017880104e45518 (0x0017880104e45518): Not supported (EndDevice)");
         expect(mockMQTTConnectAsync).toHaveBeenCalledTimes(1);
         expect(mockMQTTConnectAsync).toHaveBeenCalledWith("mqtt://localhost", {
@@ -143,6 +149,7 @@ describe("Controller", () => {
             user: "user1",
             client_id: "my_client_id",
             reject_unauthorized: false,
+            server_name: "mqtt.example.com",
             version: 5,
             maximum_packet_size: 20000,
         };
@@ -160,6 +167,7 @@ describe("Controller", () => {
             username: "user1",
             clientId: "my_client_id",
             rejectUnauthorized: false,
+            servername: "mqtt.example.com",
             protocolVersion: 5,
             properties: {maximumPacketSize: 20000},
         };
@@ -323,11 +331,14 @@ describe("Controller", () => {
     });
 
     it("Should remove device on blocklist on startup", async () => {
-        settings.set(["blocklist"], [devices.bulb_color.ieeeAddr]);
+        settings.set(["blocklist"], [devices.bulb_color.ieeeAddr, "0x9998889998889990", "0x00124b00120144ae"]);
         await controller.start();
         await flushPromises();
         expect(devices.bulb_color.removeFromNetwork).toHaveBeenCalledTimes(1);
         expect(devices.bulb.removeFromNetwork).toHaveBeenCalledTimes(0);
+        expect(devices.coordinator.removeFromNetwork).toHaveBeenCalledTimes(0);
+        const debugCalls = mockLogger.debug.mock.calls.map((c) => (typeof c[0] === "string" ? c[0] : c[0]()));
+        expect(debugCalls.find((v) => v === "Ignoring blocklist device 0x9998889998889990, not currently on the network")).toBeDefined();
     });
 
     it("Start controller fails", async () => {
@@ -407,6 +418,252 @@ describe("Controller", () => {
         expect(mockUnixDgramSend).toHaveBeenCalledTimes(2);
 
         delete process.env.NOTIFY_SOCKET;
+    });
+
+    describe("aborts during startup", () => {
+        let stateStartSpy: MockInstance<() => void>;
+        let zigbeeStartSpy: MockInstance<() => Promise<boolean>>;
+        let mqttConnectSpy: MockInstance<() => Promise<void>>;
+        let extensionStartSpy: MockInstance<() => Promise<void>>;
+        let publishEntityStateSpy: MockInstance<() => Promise<void>>;
+        let extensionStopSpy: MockInstance<() => Promise<void>>;
+        let mqttDisconnectSpy: MockInstance<() => Promise<void>>;
+        let mqttPublishSpy: MockInstance<() => Promise<void>>;
+
+        beforeEach(() => {
+            stateStartSpy = vi.spyOn(controller.state, "start");
+            zigbeeStartSpy = vi.spyOn(controller.zigbee, "start");
+            mqttConnectSpy = vi.spyOn(controller.mqtt, "connect");
+            const [firstExt] = controller.extensions;
+            extensionStartSpy = vi.spyOn(firstExt, "start");
+            publishEntityStateSpy = vi.spyOn(controller, "publishEntityState");
+            extensionStopSpy = vi.spyOn(firstExt, "stop");
+            mqttDisconnectSpy = vi.spyOn(controller.mqtt, "disconnect");
+            mqttPublishSpy = vi.spyOn(controller.mqtt, "publish");
+        });
+
+        afterEach(() => {
+            stopAfter = false;
+            stateStartSpy.mockRestore();
+            zigbeeStartSpy.mockRestore();
+            mqttConnectSpy.mockRestore();
+            extensionStartSpy.mockRestore();
+            publishEntityStateSpy.mockRestore();
+            extensionStopSpy.mockRestore();
+            mqttDisconnectSpy.mockRestore();
+            mqttPublishSpy.mockRestore();
+        });
+
+        it("during state start", async () => {
+            stateStartSpy.mockImplementationOnce(async () => {
+                await controller.stop(undefined, undefined, "SIGINT");
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(0);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it("during zigbee resolve definitions", async () => {
+            const resolveDevicesDefinitionsSpy = vi.spyOn(controller.zigbee, "resolveDevicesDefinitions");
+            resolveDevicesDefinitionsSpy.mockImplementationOnce(async (ignoreCache, abortSignal) => {
+                const device = controller.zigbee.resolveEntity(devices.bulb)! as Device;
+                device.resolveDefinition = vi.fn(async () => {
+                    await controller.stop(undefined, undefined, "SIGINT");
+                });
+
+                return await controller.zigbee.resolveDevicesDefinitions(ignoreCache, abortSignal);
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it("during MQTT connect", async () => {
+            mqttConnectSpy.mockImplementationOnce(async () => {
+                await controller.stop(undefined, undefined, "SIGINT");
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(1);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it("during extension start", async () => {
+            extensionStartSpy.mockImplementationOnce(async () => {
+                await controller.stop(undefined, undefined, "SIGINT");
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(1);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(1);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(3);
+        });
+
+        it("during entity state publish", async () => {
+            publishEntityStateSpy.mockImplementationOnce(async () => {
+                await controller.stop(undefined, undefined, "SIGINT");
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(1);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(1);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(1);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(13);
+        });
+
+        it("without signal during state start", async () => {
+            stateStartSpy.mockImplementationOnce(async () => {
+                await controller.stop();
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(0);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it("without signal during MQTT connect", async () => {
+            mqttConnectSpy.mockImplementationOnce(async () => {
+                await controller.stop();
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(1);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it("during ZH Controller start", async () => {
+            mockZHController.start.mockImplementationOnce(async (abortSignal) => {
+                void controller.stop(undefined, undefined, "SIGINT");
+                abortSignal?.throwIfAborted();
+
+                return await Promise.resolve("resumed");
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it("during ZH Controller getNetworkParameters", async () => {
+            mockZHController.getNetworkParameters.mockImplementationOnce(async () => {
+                await controller.stop(undefined, undefined, "SIGINT");
+
+                return await Promise.resolve({panID: 0x162a, extendedPanID: "0x64c5fd698daf0c00", channel: 15, nwkUpdateID: 0});
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it("during ZH Controller passlist", async () => {
+            settings.set(["passlist"], [devices.bulb_color.ieeeAddr]);
+            devices.bulb.removeFromNetwork.mockImplementationOnce(async () => {
+                await controller.stop(undefined, undefined, "SIGINT");
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
+
+        it("during ZH Controller blocklist", async () => {
+            settings.set(["blocklist"], [devices.bulb_color.ieeeAddr]);
+            devices.bulb_color.removeFromNetwork.mockImplementationOnce(async () => {
+                await controller.stop(undefined, undefined, "SIGINT");
+            });
+
+            await controller.start();
+            await flushPromises();
+
+            expect(stateStartSpy).toHaveBeenCalledTimes(1);
+            expect(zigbeeStartSpy).toHaveBeenCalledTimes(1);
+            expect(mqttConnectSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStartSpy).toHaveBeenCalledTimes(0);
+            expect(publishEntityStateSpy).toHaveBeenCalledTimes(0);
+            expect(extensionStopSpy).toHaveBeenCalledTimes(1);
+            expect(mqttDisconnectSpy).toHaveBeenCalledTimes(1);
+            expect(mqttPublishSpy).toHaveBeenCalledTimes(0);
+        });
     });
 
     it("Start controller adapter disconnects", async () => {
@@ -804,6 +1061,17 @@ describe("Controller", () => {
         );
     });
 
+    it("Publish entity state attribute output with a null color", async () => {
+        await controller.start();
+        settings.set(["advanced", "output"], "attribute_and_json");
+        mockMQTTPublishAsync.mockClear();
+        const device = getZ2MDevice("bulb");
+        await controller.publishEntityState(device, {state: "ON", color: null});
+        await flushPromises();
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bulb/state", "ON", {qos: 0, retain: true});
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bulb/color", "", {qos: 0, retain: true});
+    });
+
     it("Publish entity state attribute_json output filtered", async () => {
         await controller.start();
         settings.set(["advanced", "output"], "attribute_and_json");
@@ -830,6 +1098,28 @@ describe("Controller", () => {
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bulb/state", "ON", {qos: 0, retain: true});
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bulb/brightness", "200", {qos: 0, retain: true});
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bulb", stringify({state: "ON", brightness: 200}), {qos: 0, retain: true});
+    });
+
+    it("Publish entity state caches a duration reported by the device", async () => {
+        await controller.start();
+        mockMQTTPublishAsync.mockClear();
+
+        const device = getZ2MDevice("bulb");
+        await controller.publishEntityState(device, {state: "ON", duration: 30});
+        await flushPromises();
+
+        expect(controller.state.get(device)).toStrictEqual({brightness: 50, color_temp: 370, linkquality: 99, state: "ON", duration: 30});
+    });
+
+    it("Publish entity state keeps an action_duration out of the cache", async () => {
+        await controller.start();
+        mockMQTTPublishAsync.mockClear();
+
+        const device = getZ2MDevice("bulb");
+        await controller.publishEntityState(device, {state: "ON", action_duration: 1500});
+        await flushPromises();
+
+        expect(controller.state.get(device)).toStrictEqual({brightness: 50, color_temp: 370, linkquality: 99, state: "ON"});
     });
 
     it("Publish entity state attribute_json output filtered cache", async () => {
@@ -1167,5 +1457,13 @@ describe("Controller", () => {
         await expect(async () => {
             await controller.enableDisableExtension(false, "Availability");
         }).rejects.toThrow("Built-in extension Availability cannot be disabled at runtime");
+    });
+
+    it("throws error when adding extension twice", async () => {
+        settings.set(["frontend", "enabled"], true);
+        await controller.start();
+        await expect(async () => {
+            await controller.addExtension(new Frontend(...controller.extensionArgs));
+        }).rejects.toThrow("Extension with name Frontend already present");
     });
 });

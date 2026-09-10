@@ -1,7 +1,7 @@
 import type * as zigbeeHerdsman from "zigbee-herdsman/dist";
 import type {ZclPayload} from "zigbee-herdsman/dist/adapter/events";
 import type {Eui64} from "zigbee-herdsman/dist/zspec/tstypes";
-import type {ClusterDefinition, ClusterName, CustomClusters} from "zigbee-herdsman/dist/zspec/zcl/definition/tstype";
+import type {Cluster, ClusterName, CustomClusters} from "zigbee-herdsman/dist/zspec/zcl/definition/tstype";
 import type {GenericZdoResponse, RoutingTableEntry} from "zigbee-herdsman/dist/zspec/zdo/definition/tstypes";
 import type * as zigbeeHerdsmanConverter from "zigbee-herdsman-converters";
 import type {Base} from "zigbee-herdsman-converters/lib/exposes";
@@ -32,7 +32,34 @@ import type {LogLevel, schemaJson} from "../util/settings";
 // biome-ignore lint/suspicious/noExplicitAny: API
 type KeyValue = Record<string, any>;
 
-export interface Zigbee2MQTTDeviceOptions {
+export interface OnboardInitData {
+    page: "form";
+    settings: Zigbee2MQTTSettings;
+    settingsSchema: typeof schemaJson;
+    devices: {
+        name: string;
+        path: Zigbee2MQTTSettings["serial"]["port"];
+        adapter?: Zigbee2MQTTSettings["serial"]["adapter"];
+        baudRate?: Zigbee2MQTTSettings["serial"]["baudrate"];
+        rtscts?: Zigbee2MQTTSettings["serial"]["rtscts"];
+    }[];
+}
+
+export interface OnboardDoneData {
+    page: "done";
+    frontendUrl: string | null;
+}
+
+export interface OnboardFailureData {
+    page: "failure";
+    errors: string[];
+}
+
+export type OnboardData = OnboardInitData | OnboardDoneData | OnboardFailureData;
+
+export type OnboardSubmitResponse = {success: true; frontendUrl: string | null} | {success: false; error: string};
+
+export type Zigbee2MQTTDeviceOptions = {
     disabled?: boolean;
     retention?: number;
     availability?:
@@ -55,9 +82,10 @@ export interface Zigbee2MQTTDeviceOptions {
     friendly_name: string;
     description?: string;
     qos?: 0 | 1 | 2;
-}
+    disable_automatic_update_check?: boolean;
+};
 
-export interface Zigbee2MQTTGroupOptions {
+export type Zigbee2MQTTGroupOptions = {
     ID: number;
     optimistic?: boolean;
     off_state?: "all_members_off" | "last_member_state";
@@ -68,9 +96,9 @@ export interface Zigbee2MQTTGroupOptions {
     friendly_name: string;
     description?: string;
     qos?: 0 | 1 | 2;
-}
+};
 
-export interface Zigbee2MQTTSettings {
+export type Zigbee2MQTTSettings = {
     version?: number;
     /** only used internally during startup, removed on successful Z2M start */
     onboarding?: true;
@@ -105,6 +133,7 @@ export interface Zigbee2MQTTSettings {
         cert?: string;
         client_id?: string;
         reject_unauthorized?: boolean;
+        server_name?: string;
         maximum_packet_size: number;
     };
     serial: {
@@ -140,6 +169,7 @@ export interface Zigbee2MQTTSettings {
         update_check_interval: number;
         disable_automatic_update_check: boolean;
         zigbee_ota_override_index_location?: string;
+        image_block_request_timeout?: number;
         image_block_response_delay?: number;
         default_maximum_data_size?: number;
     };
@@ -186,13 +216,15 @@ export interface Zigbee2MQTTSettings {
         timestamp_format: string;
         output: "json" | "attribute" | "attribute_and_json";
         transmit_power?: number;
+        /** 3.0: default to false (JSON schema & settings `defaults`) */
+        enable_external_js: boolean;
     };
     health: {
         /** in minutes */
         interval: number;
         reset_on_check: boolean;
     };
-}
+};
 
 export interface Zigbee2MQTTScene {
     id: number;
@@ -230,6 +262,7 @@ export interface Zigbee2MQTTDeviceDefinition {
     exposes: zigbeeHerdsmanConverter.Expose[];
     supports_ota: boolean;
     options: zigbeeHerdsmanConverter.Option[];
+    version: `0.0.${number}`;
     icon: string;
 }
 
@@ -314,7 +347,7 @@ export interface Zigbee2MQTTAPI {
     };
 
     "bridge/definitions": {
-        clusters: Readonly<Record<ClusterName, Readonly<ClusterDefinition>>>;
+        clusters: Readonly<Record<ClusterName, Cluster>>;
         custom_clusters: Record<string, CustomClusters>;
         actions: string[];
     };
@@ -589,32 +622,71 @@ export interface Zigbee2MQTTAPI {
         id: string;
         block?: boolean;
         force?: boolean;
+        keep_config?: boolean;
+        clear_cache?: boolean;
     };
 
     "bridge/response/device/remove": {
         id: string;
         block: boolean;
         force: boolean;
+        keep_config: boolean;
+        clear_cache: boolean;
     };
 
     "bridge/request/device/ota_update/check": {
         id: string;
+        /** expected to point to an index json if provided */
+        url?: string | null;
     };
 
     "bridge/request/device/ota_update/check/downgrade": {
         id: string;
+        /** expected to point to an index json if provided */
+        url?: string | null;
     };
 
     "bridge/response/device/ota_update/check": {
         id: string;
         update_available: boolean;
+        downgrade?: boolean;
+        source?: string;
+        release_notes?: string;
     };
 
     "bridge/request/device/ota_update/update": {
         id: string;
+        url?: string | null;
+        /**
+         * Full firmware file in hex form (expected compatible with `Buffer.from(hex, "hex")`)
+         * If file name supplied, will be used instead of <ieee_utc> to store firmware in data dir.
+         */
+        hex?: {data: string; file_name?: string} | null;
+        image_block_request_timeout?: number | null;
+        image_block_response_delay?: number | null;
+        /** may be overridden internally to match specific device needs */
+        default_maximum_data_size?: number | null;
     };
 
     "bridge/request/device/ota_update/update/downgrade": {
+        id: string;
+        url?: string | null;
+        /**
+         * Full firmware file in hex form (expected compatible with `Buffer.from(hex, "hex")`)
+         * If file name supplied, will be used instead of <ieee_utc> to store firmware in data dir.
+         */
+        hex?: {data: string; file_name?: string} | null;
+        image_block_request_timeout?: number | null;
+        image_block_response_delay?: number | null;
+        /** may be overridden internally to match specific device needs */
+        default_maximum_data_size?: number | null;
+    };
+
+    "bridge/request/device/ota_update/update/abort": {
+        id: string;
+    };
+
+    "bridge/response/device/ota_update/update/abort": {
         id: string;
     };
 
@@ -622,28 +694,43 @@ export interface Zigbee2MQTTAPI {
         id: string;
         from:
             | {
-                  software_build_id: string;
-                  date_code: string;
+                  file_version: number;
+                  software_build_id?: string;
+                  date_code?: string;
               }
             | undefined;
         to:
             | {
-                  software_build_id: string;
-                  date_code: string;
+                  file_version: number;
+                  software_build_id?: string;
+                  date_code?: string;
               }
             | undefined;
     };
 
     "bridge/request/device/ota_update/schedule": {
         id: string;
+        url?: string | null;
+        /**
+         * Full firmware file in hex form (expected compatible with `Buffer.from(hex, "hex")`)
+         * If file name supplied, will be used instead of <ieee_utc> to store firmware in data dir.
+         */
+        hex?: {data: string; file_name?: string} | null;
     };
 
     "bridge/request/device/ota_update/schedule/downgrade": {
         id: string;
+        url?: string | null;
+        /**
+         * Full firmware file in hex form (expected compatible with `Buffer.from(hex, "hex")`)
+         * If file name supplied, will be used instead of <ieee_utc> to store firmware in data dir.
+         */
+        hex?: {data: string; file_name?: string} | null;
     };
 
     "bridge/response/device/ota_update/schedule": {
         id: string;
+        url?: string;
     };
 
     "bridge/request/device/ota_update/unschedule": {
@@ -927,6 +1014,7 @@ export type Zigbee2MQTTRequestEndpoints =
     | "bridge/request/device/ota_update/check/downgrade"
     | "bridge/request/device/ota_update/update"
     | "bridge/request/device/ota_update/update/downgrade"
+    | "bridge/request/device/ota_update/update/abort"
     | "bridge/request/device/ota_update/schedule"
     | "bridge/request/device/ota_update/schedule/downgrade"
     | "bridge/request/device/ota_update/unschedule"
@@ -976,6 +1064,7 @@ export type Zigbee2MQTTResponseEndpoints =
     | "bridge/response/device/remove"
     | "bridge/response/device/ota_update/check"
     | "bridge/response/device/ota_update/update"
+    | "bridge/response/device/ota_update/update/abort"
     | "bridge/response/device/ota_update/schedule"
     | "bridge/response/device/ota_update/unschedule"
     | "bridge/response/device/interview"

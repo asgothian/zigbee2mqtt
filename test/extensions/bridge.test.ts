@@ -2,7 +2,7 @@
 import {afterAll, beforeAll, beforeEach, describe, expect, it, vi} from "vitest";
 import {Zdo} from "zigbee-herdsman";
 import * as data from "../mocks/data";
-import {mockJSZipFile, mockJSZipGenerateAsync} from "../mocks/jszip";
+import {mockFflateZip, mockFflateZipFailOnce} from "../mocks/fflate";
 import {mockLogger} from "../mocks/logger";
 import {events as mockMQTTEvents, mockMQTTPublishAsync} from "../mocks/mqtt";
 import {flushPromises} from "../mocks/utils";
@@ -12,7 +12,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import {platform} from "node:os";
 import path from "node:path";
-import stringify from "json-stable-stringify-without-jsonify";
+import {stringify} from "../../lib/util/stringify";
 import type {Mock} from "vitest";
 import {Controller} from "../../lib/controller";
 import Bridge from "../../lib/extension/bridge";
@@ -144,6 +144,7 @@ describe("Extension: Bridge", () => {
                         output: "json",
                         pan_id: 6754,
                         timestamp_format: "YYYY-MM-DD HH:mm:ss",
+                        enable_external_js: true,
                     },
                     blocklist: [],
                     device_options: {},
@@ -322,6 +323,7 @@ describe("Extension: Bridge", () => {
                     ota: {
                         default_maximum_data_size: 50,
                         disable_automatic_update_check: false,
+                        image_block_request_timeout: 150000,
                         image_block_response_delay: 250,
                         update_check_interval: 1440,
                     },
@@ -596,6 +598,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: true,
                         vendor: "IKEA",
+                        version: "0.0.0",
                     },
                     description: "this is my bulb",
                     disabled: false,
@@ -733,7 +736,7 @@ describe("Extension: Bridge", () => {
                                 values: ["off", "on", "toggle", "previous"],
                             },
                             {
-                                access: 2,
+                                access: 3,
                                 label: "Effect",
                                 name: "effect",
                                 property: "effect",
@@ -746,10 +749,50 @@ describe("Extension: Bridge", () => {
                                     "candle",
                                     "fireplace",
                                     "colorloop",
+                                    "sunset",
+                                    "sunrise",
+                                    "sparkle",
+                                    "opal",
+                                    "glisten",
+                                    "underwater",
+                                    "cosmos",
+                                    "sunbeam",
+                                    "enchant",
+                                    "none",
                                     "finish_effect",
                                     "stop_effect",
                                     "stop_hue_effect",
                                 ],
+                            },
+                            {
+                                access: 3,
+                                description: "Animation speed for the active effect (0=slowest, 1=fastest)",
+                                label: "Effect speed",
+                                name: "effect_speed",
+                                property: "effect_speed",
+                                type: "numeric",
+                                value_max: 1,
+                                value_min: 0,
+                                value_step: 0.01,
+                            },
+                            {
+                                access: 2,
+                                description:
+                                    'Set the base color of the active effect without stopping it (hex e.g. #FF4400, or JSON {"x":0.6,"y":0.3})',
+                                label: "Effect color",
+                                name: "effect_color",
+                                property: "effect_color",
+                                type: "text",
+                            },
+                            {
+                                access: 2,
+                                category: "config",
+                                description: "Initiate device identification",
+                                label: "Identify",
+                                name: "identify",
+                                property: "identify",
+                                type: "enum",
+                                values: ["identify"],
                             },
                             {
                                 access: 1,
@@ -769,6 +812,27 @@ describe("Extension: Bridge", () => {
                             {
                                 access: 2,
                                 description:
+                                    "Control this light using a Philips-specific protocol instead of standard Zigbee commands. When enabled, on/off, brightness, color, and color temperature are combined into single atomic commands. This is required to use the Effect color update mode. When disabled (default), standard Zigbee commands are used, which preserves the usual behavior, including simulating on/off transitions.",
+                                label: "Hue native control",
+                                name: "hue_native_control",
+                                property: "hue_native_control",
+                                type: "binary",
+                                value_off: false,
+                                value_on: true,
+                            },
+                            {
+                                access: 2,
+                                description:
+                                    "Controls what happens when color is changed while an effect is active (requires Hue native control). 'stop' (default): color change stops the effect (Hue app behavior). 'update': color change re-sends the effect with the new color.",
+                                label: "Effect color mode",
+                                name: "effect_color_mode",
+                                property: "effect_color_mode",
+                                type: "enum",
+                                values: ["stop", "update"],
+                            },
+                            {
+                                access: 2,
+                                description:
                                     "Controls the transition time (in seconds) of on/off, brightness, color temperature (if applicable) and color (if applicable) changes. Defaults to `0` (no transition).",
                                 label: "Transition",
                                 name: "transition",
@@ -776,6 +840,27 @@ describe("Extension: Bridge", () => {
                                 type: "numeric",
                                 value_min: 0,
                                 value_step: 0.1,
+                            },
+                            {
+                                access: 2,
+                                description:
+                                    "Sets the duration of the identification procedure in seconds (i.e., how long the device would flash).The value ranges from 1 to 30 seconds (default: 3).",
+                                label: "Identify timeout",
+                                name: "identify_timeout",
+                                property: "identify_timeout",
+                                type: "numeric",
+                                value_max: 30,
+                                value_min: 1,
+                            },
+                            {
+                                access: 2,
+                                description: "State actions will also be published as 'action' when true (default false).",
+                                label: "State action",
+                                name: "state_action",
+                                property: "state_action",
+                                type: "binary",
+                                value_off: false,
+                                value_on: true,
                             },
                             {
                                 access: 2,
@@ -788,19 +873,10 @@ describe("Extension: Bridge", () => {
                                 value_off: false,
                                 value_on: true,
                             },
-                            {
-                                access: 2,
-                                description: "State actions will also be published as 'action' when true (default false).",
-                                label: "State action",
-                                name: "state_action",
-                                property: "state_action",
-                                type: "binary",
-                                value_off: false,
-                                value_on: true,
-                            },
                         ],
                         supports_ota: true,
                         vendor: "Philips",
+                        version: "0.0.0",
                     },
                     disabled: false,
                     endpoints: {
@@ -830,7 +906,7 @@ describe("Extension: Bridge", () => {
                 {
                     definition: {
                         source: "native",
-                        description: "Hue dimmer switch",
+                        description: "Hue dimmer switch gen 1",
                         exposes: [
                             {
                                 access: 1,
@@ -929,6 +1005,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: true,
                         vendor: "Philips",
+                        version: "0.0.0",
                     },
                     disabled: false,
                     endpoints: {
@@ -1037,6 +1114,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: false,
                         vendor: "notSupportedMfg",
+                        version: "0.0.0",
                     },
                     disabled: false,
                     endpoints: {
@@ -1106,6 +1184,17 @@ describe("Extension: Bridge", () => {
                                 type: "numeric",
                             },
                             {
+                                access: 2,
+                                category: "config",
+                                description:
+                                    "Initiate device identification. This device is asleep by default.You may need to wake it up first before sending the identify command.",
+                                label: "Identify",
+                                name: "identify",
+                                property: "identify",
+                                type: "enum",
+                                values: ["identify"],
+                            },
+                            {
                                 access: 1,
                                 category: "diagnostic",
                                 description: "Triggered action (e.g. a button click)",
@@ -1139,9 +1228,21 @@ describe("Extension: Bridge", () => {
                                 type: "numeric",
                                 value_step: 0.1,
                             },
+                            {
+                                access: 2,
+                                description:
+                                    "Sets the duration of the identification procedure in seconds (i.e., how long the device would flash).The value ranges from 1 to 30 seconds (default: 3).",
+                                label: "Identify timeout",
+                                name: "identify_timeout",
+                                property: "identify_timeout",
+                                type: "numeric",
+                                value_max: 30,
+                                value_min: 1,
+                            },
                         ],
                         supports_ota: false,
                         vendor: "Aqara",
+                        version: "0.0.0",
                     },
                     disabled: false,
                     endpoints: {
@@ -1303,6 +1404,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: false,
                         vendor: "Aqara",
+                        version: "0.0.0",
                     },
                     disabled: false,
                     endpoints: {"1": {bindings: [], clusters: {input: ["genBasic"], output: []}, configured_reportings: [], scenes: []}},
@@ -1454,6 +1556,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: true,
                         vendor: "Xiaomi",
+                        version: "0.0.0",
                     },
                     disabled: false,
                     endpoints: {"1": {bindings: [], clusters: {input: ["genBasic", "genOnOff"], output: []}, configured_reportings: [], scenes: []}},
@@ -1902,7 +2005,7 @@ describe("Extension: Bridge", () => {
                             },
                             {
                                 access: 2,
-                                description: "Inverts the cover position, false: open=100,close=0, true: open=0,close=100 (default false).",
+                                description: "Inverts the cover position and state, false: open=100,close=0, true: open=0,close=100 (default false).",
                                 label: "Invert cover",
                                 name: "invert_cover",
                                 property: "invert_cover",
@@ -1913,6 +2016,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: false,
                         vendor: "Siglis",
+                        version: "0.0.0",
                     },
                     disabled: false,
                     endpoints: {
@@ -2203,6 +2307,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: true,
                         vendor: "IKEA",
+                        version: "0.0.0",
                     },
                     disabled: false,
                     endpoints: {
@@ -2638,6 +2743,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: true,
                         vendor: "IKEA",
+                        version: "0.0.0",
                     },
                     friendly_name: "bulb",
                     ieee_address: "0x000b57fffec6a5b2",
@@ -2724,6 +2830,7 @@ describe("Extension: Bridge", () => {
                         ],
                         supports_ota: false,
                         vendor: "notSupportedMfg",
+                        version: "0.0.0",
                     },
                     friendly_name: "0x0017880104e45518",
                     ieee_address: "0x0017880104e45518",
@@ -2742,7 +2849,7 @@ describe("Extension: Bridge", () => {
         mockMQTTPublishAsync.mockClear();
         await mockZHEvents.deviceLeave({ieeeAddr: devices.bulb.ieeeAddr});
         await flushPromises();
-        expect(mockMQTTPublishAsync).toHaveBeenCalledTimes(3);
+        expect(mockMQTTPublishAsync).toHaveBeenCalledTimes(4);
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/event",
             stringify({type: "device_leave", data: {ieee_address: "0x000b57fffec6a5b2", friendly_name: "bulb"}}),
@@ -2755,6 +2862,7 @@ describe("Extension: Bridge", () => {
             expect.any(String),
             {retain: true},
         );
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/groups", expect.any(String), {retain: true});
     });
 
     it("Should allow permit join on all", async () => {
@@ -2909,6 +3017,7 @@ describe("Extension: Bridge", () => {
 
     it("Should allow to remove device by string", async () => {
         const device = devices.bulb;
+        const removeSpy = vi.spyOn(controller.zigbee, "removeDeviceFromLookup");
         mockMQTTPublishAsync.mockClear();
         mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/remove", "bulb");
         await flushPromises();
@@ -2917,11 +3026,12 @@ describe("Extension: Bridge", () => {
         expect(device.removeFromNetwork).toHaveBeenCalledTimes(1);
         expect(device.removeFromDatabase).not.toHaveBeenCalled();
         expect(settings.getDevice("bulb")).toBeUndefined();
+        expect(removeSpy).not.toHaveBeenCalled();
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bulb", "", {retain: true});
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/devices", expect.any(String), expect.any(Object));
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/device/remove",
-            stringify({data: {id: "bulb", block: false, force: false}, status: "ok"}),
+            stringify({data: {id: "bulb", block: false, force: false, keep_config: false, clear_cache: false}, status: "ok"}),
             {},
         );
         expect(settings.get().blocklist).toStrictEqual([]);
@@ -2931,50 +3041,92 @@ describe("Extension: Bridge", () => {
 
     it("Should allow to remove device by object ID", async () => {
         const device = devices.bulb;
+        const removeSpy = vi.spyOn(controller.zigbee, "removeDeviceFromLookup");
         mockMQTTPublishAsync.mockClear();
         mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/remove", stringify({id: "bulb"}));
         await flushPromises();
         expect(device.removeFromNetwork).toHaveBeenCalledTimes(1);
         expect(device.removeFromDatabase).not.toHaveBeenCalled();
         expect(settings.getDevice("bulb")).toBeUndefined();
+        expect(removeSpy).not.toHaveBeenCalled();
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/devices", expect.any(String), expect.any(Object));
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/device/remove",
-            stringify({data: {id: "bulb", block: false, force: false}, status: "ok"}),
+            stringify({data: {id: "bulb", block: false, force: false, keep_config: false, clear_cache: false}, status: "ok"}),
             {},
         );
     });
 
     it("Should allow to force remove device", async () => {
         const device = devices.bulb;
+        const removeSpy = vi.spyOn(controller.zigbee, "removeDeviceFromLookup");
         mockMQTTPublishAsync.mockClear();
         mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/remove", stringify({id: "bulb", force: true}));
         await flushPromises();
         expect(device.removeFromDatabase).toHaveBeenCalledTimes(1);
         expect(device.removeFromNetwork).not.toHaveBeenCalled();
         expect(settings.getDevice("bulb")).toBeUndefined();
+        expect(removeSpy).not.toHaveBeenCalled();
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/devices", expect.any(String), expect.any(Object));
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/device/remove",
-            stringify({data: {id: "bulb", block: false, force: true}, status: "ok"}),
+            stringify({data: {id: "bulb", block: false, force: true, keep_config: false, clear_cache: false}, status: "ok"}),
             {},
         );
     });
 
     it("Should allow to block device", async () => {
         const device = devices.bulb;
+        const removeSpy = vi.spyOn(controller.zigbee, "removeDeviceFromLookup");
         mockMQTTPublishAsync.mockClear();
         mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/remove", stringify({id: "bulb", block: true, force: true}));
         await flushPromises();
         expect(device.removeFromDatabase).toHaveBeenCalledTimes(1);
         expect(settings.getDevice("bulb")).toBeUndefined();
+        expect(removeSpy).not.toHaveBeenCalled();
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/devices", expect.any(String), expect.any(Object));
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/device/remove",
-            stringify({data: {id: "bulb", block: true, force: true}, status: "ok"}),
+            stringify({data: {id: "bulb", block: true, force: true, keep_config: false, clear_cache: false}, status: "ok"}),
             {},
         );
         expect(settings.get().blocklist).toStrictEqual(["0x000b57fffec6a5b2"]);
+    });
+
+    it("Should allow to keep configuration when removing device", async () => {
+        const device = devices.bulb;
+        const removeSpy = vi.spyOn(controller.zigbee, "removeDeviceFromLookup");
+        mockMQTTPublishAsync.mockClear();
+        mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/remove", stringify({id: "bulb", keep_config: true}));
+        await flushPromises();
+        expect(device.removeFromDatabase).not.toHaveBeenCalled();
+        expect(device.removeFromNetwork).toHaveBeenCalledTimes(1);
+        expect(settings.getDevice("bulb")).toBeDefined();
+        expect(removeSpy).not.toHaveBeenCalled();
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/devices", expect.any(String), expect.any(Object));
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
+            "zigbee2mqtt/bridge/response/device/remove",
+            stringify({data: {id: "bulb", block: false, force: false, keep_config: true, clear_cache: false}, status: "ok"}),
+            {},
+        );
+    });
+
+    it("Should allow to clear cache when removing device", async () => {
+        const device = devices.bulb;
+        const removeSpy = vi.spyOn(controller.zigbee, "removeDeviceFromLookup");
+        mockMQTTPublishAsync.mockClear();
+        mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/remove", stringify({id: "bulb", clear_cache: true}));
+        await flushPromises();
+        expect(device.removeFromNetwork).toHaveBeenCalledTimes(1);
+        expect(device.removeFromDatabase).not.toHaveBeenCalled();
+        expect(settings.getDevice("bulb")).toBeUndefined();
+        expect(removeSpy).toHaveNthReturnedWith(1, true);
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/devices", expect.any(String), expect.any(Object));
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
+            "zigbee2mqtt/bridge/response/device/remove",
+            stringify({data: {id: "bulb", block: false, force: false, keep_config: false, clear_cache: true}, status: "ok"}),
+            {},
+        );
     });
 
     it("Should allow to remove group", async () => {
@@ -3041,7 +3193,11 @@ describe("Extension: Bridge", () => {
         await flushPromises();
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/device/remove",
-            stringify({data: {}, status: "error", error: "Failed to remove device 'bulb' (block: false, force: false) (Error: device timeout)"}),
+            stringify({
+                data: {},
+                status: "error",
+                error: "Failed to remove device 'bulb' (block: false, force: false, keep config: false, clear cache: false) (Error: device timeout)",
+            }),
             {},
         );
     });
@@ -3263,7 +3419,7 @@ describe("Extension: Bridge", () => {
         await flushPromises();
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/device/interview",
-            stringify({data: {}, status: "error", error: "interview of 'bulb' (0x000b57fffec6a5b2) failed: Error: something went wrong"}),
+            stringify({data: {}, status: "error", error: "Interview of 'bulb' (0x000b57fffec6a5b2) failed: Error: something went wrong"}),
             {},
         );
     });
@@ -3307,7 +3463,7 @@ describe("Extension: Bridge", () => {
                         "    model: 'lumi.plug',\n" +
                         "    vendor: '',\n" +
                         "    description: 'Automatically generated definition',\n" +
-                        '    extend: [m.onOff({"powerOnBehavior":false})],\n' +
+                        "    extend: [m.onOff()],\n" +
                         "};\n",
                 },
                 status: "ok",
@@ -3486,6 +3642,36 @@ describe("Extension: Bridge", () => {
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/device/options",
             stringify({data: {}, status: "error", error: "Invalid payload"}),
+            {},
+        );
+    });
+
+    it("Should warn on unsupported device option", async () => {
+        mockMQTTPublishAsync.mockClear();
+        mockLogger.warning.mockClear();
+
+        const device = controller.zigbee.resolveEntity(devices.bulb.ieeeAddr);
+        assert(device && "definition" in device);
+        const definitionOptions = device.definition?.options;
+        device.definition!.options = undefined;
+
+        mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/options", stringify({options: {unsupported: true}, id: "bulb"}));
+        await flushPromises();
+        device.definition!.options = definitionOptions;
+
+        expect(settings.getDevice("bulb")).toHaveProperty("unsupported");
+        expect(mockLogger.warning).toHaveBeenCalledWith("Device 'bulb' does not support option 'unsupported'");
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
+            "zigbee2mqtt/bridge/response/device/options",
+            stringify({
+                data: {
+                    from: {retain: true, description: "this is my bulb"},
+                    to: {retain: true, description: "this is my bulb", unsupported: true},
+                    id: "bulb",
+                    restart_required: false,
+                },
+                status: "ok",
+            }),
             {},
         );
     });
@@ -4085,6 +4271,8 @@ describe("Extension: Bridge", () => {
         fs.writeFileSync(path.join(data.mockDir, "ext_converters", "afile.js"), "test123");
         fs.mkdirSync(path.join(data.mockDir, "log"));
         fs.writeFileSync(path.join(data.mockDir, "log", "log.log"), "test123");
+        fs.mkdirSync(path.join(data.mockDir, "ota"));
+        fs.writeFileSync(path.join(data.mockDir, "ota", "my.ota"), "test123");
         fs.mkdirSync(path.join(data.mockDir, "ext_converters", "123"));
         fs.writeFileSync(path.join(data.mockDir, "ext_converters", "123", "myfile.js"), "test123");
         fs.symlinkSync(
@@ -4096,16 +4284,39 @@ describe("Extension: Bridge", () => {
         mockMQTTEvents.message("zigbee2mqtt/bridge/request/backup", "");
         await flushPromises();
         expect(mockZHController.backup).toHaveBeenCalledTimes(1);
-        expect(mockJSZipFile).toHaveBeenCalledTimes(4);
-        expect(mockJSZipFile).toHaveBeenNthCalledWith(1, "configuration.yaml", expect.any(Object));
-        expect(mockJSZipFile).toHaveBeenNthCalledWith(2, path.join("ext_converters", "123", "myfile.js"), expect.any(Object));
-        expect(mockJSZipFile).toHaveBeenNthCalledWith(3, path.join("ext_converters", "afile.js"), expect.any(Object));
-        expect(mockJSZipFile).toHaveBeenNthCalledWith(4, "state.json", expect.any(Object));
-        expect(mockJSZipGenerateAsync).toHaveBeenCalledTimes(1);
-        expect(mockJSZipGenerateAsync).toHaveBeenNthCalledWith(1, {type: "base64"});
+        expect(mockFflateZip).toHaveBeenCalledTimes(1);
+        expect(mockFflateZip).toHaveBeenNthCalledWith(
+            1,
+            {
+                "configuration.yaml": expect.any(Buffer),
+                [path.join("ext_converters", "123", "myfile.js")]: expect.any(Buffer),
+                [path.join("ext_converters", "afile.js")]: expect.any(Buffer),
+                "state.json": expect.any(Buffer),
+            },
+            {level: 6},
+            expect.any(Function),
+        );
+        expect(Object.keys(mockFflateZip.mock.calls[0][0])).toStrictEqual([
+            "configuration.yaml",
+            path.join("ext_converters", "123", "myfile.js"),
+            path.join("ext_converters", "afile.js"),
+            "state.json",
+        ]);
         expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
             "zigbee2mqtt/bridge/response/backup",
             stringify({data: {zip: "THISISBASE64"}, status: "ok"}),
+            {},
+        );
+    });
+
+    it("Should return an error when the backup archive cannot be created", async () => {
+        mockMQTTPublishAsync.mockClear();
+        mockFflateZipFailOnce(new Error("invalid zip data"));
+        mockMQTTEvents.message("zigbee2mqtt/bridge/request/backup", "");
+        await flushPromises();
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
+            "zigbee2mqtt/bridge/response/backup",
+            stringify({data: {}, status: "error", error: "invalid zip data"}),
             {},
         );
     });
@@ -4129,6 +4340,15 @@ describe("Extension: Bridge", () => {
             stringify({data: {restart_required: true}, status: "ok"}),
             {},
         );
+
+        // Change an option
+        await mockMQTTEvents.message(
+            "zigbee2mqtt/bridge/request/options",
+            stringify({options: {homeassistant: {enabled: true, experimental_event_entities: true}}}),
+        );
+        // @ts-expect-error - private property
+        await vi.waitUntil(() => controller.getExtension("HomeAssistant")?.experimentalEventEntities === true);
+
         // revert
         await mockMQTTEvents.message("zigbee2mqtt/bridge/request/options", stringify({options: {homeassistant: {enabled: false}}}));
         await vi.waitUntil(() => controller.getExtension("HomeAssistant") === undefined);
@@ -4248,6 +4468,58 @@ describe("Extension: Bridge", () => {
             stringify({data: {}, error: "advanced/log_level must be string", status: "error"}),
             {},
         );
+    });
+
+    it("Change options consecutively, check restart required", async () => {
+        settings.apply({health: {interval: 10, reset_on_check: false}});
+        mockMQTTPublishAsync.mockClear();
+
+        // Change option that doesn't require restart
+        mockMQTTEvents.message("zigbee2mqtt/bridge/request/options", stringify({options: {health: {reset_on_check: true}}}));
+        await flushPromises();
+
+        expect(settings.get().health.reset_on_check).toBe(true);
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
+            "zigbee2mqtt/bridge/response/options",
+            stringify({data: {restart_required: false}, status: "ok"}),
+            {},
+        );
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/info", expect.stringContaining('"restart_required":false'), {
+            retain: true,
+        });
+        mockMQTTPublishAsync.mockClear();
+
+        // Change option that requires restart
+        mockMQTTEvents.message("zigbee2mqtt/bridge/request/options", stringify({options: {health: {interval: 11}}}));
+        await flushPromises();
+
+        expect(settings.get().health.interval).toBe(11);
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
+            "zigbee2mqtt/bridge/response/options",
+            stringify({data: {restart_required: true}, status: "ok"}),
+            {},
+        );
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/info", expect.stringContaining('"restart_required":true'), {
+            retain: true,
+        });
+        mockMQTTPublishAsync.mockClear();
+
+        // Change option that doesn't require restart
+        mockMQTTEvents.message("zigbee2mqtt/bridge/request/options", stringify({options: {health: {reset_on_check: false}}}));
+        await flushPromises();
+
+        expect(settings.get().health.reset_on_check).toBe(false);
+
+        // System still requires restart
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith(
+            "zigbee2mqtt/bridge/response/options",
+            stringify({data: {restart_required: true}, status: "ok"}),
+            {},
+        );
+        expect(mockMQTTPublishAsync).toHaveBeenCalledWith("zigbee2mqtt/bridge/info", expect.stringContaining('"restart_required":true'), {
+            retain: true,
+        });
+        mockMQTTPublishAsync.mockClear();
     });
 
     it("Icon link handling", () => {
